@@ -1,7 +1,7 @@
 # BetterDesk Client (full / clean desktop) — build + GitHub Release.
 #
-# Builds the official BetterDesk desktop client after each update on master
-# (and on desktop/* tags / manual dispatch). Publishes installers with a
+# Builds the official BetterDesk desktop client only on manual dispatch.
+# Publishes installers with a
 # RustDesk-style download table in the release notes.
 #
 # Incoming-only Support Agent packages are a separate workflow:
@@ -10,17 +10,6 @@
 name: BetterDesk desktop release
 
 on:
-  push:
-    branches:
-      - master
-    tags:
-      - "desktop/*"
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - ".gitignore"
-      - "LICENSE"
-      - "PRIVACY"
   workflow_dispatch:
     inputs:
       tag_name:

@@ -1,0 +1,143 @@
+name: BetterDesk Support Agent configured release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "New release tag: support-configured-v1.5.0[-suffix]"
+        type: string
+        required: true
+        default: support-configured-v1.5.0
+      prerelease:
+        description: "Mark release as prerelease"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: support-configured-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      payload: ${{ steps.config.outputs.payload }}
+      public-key: ${{ steps.config.outputs.public-key }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate version and tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 scripts/validate_release_metadata.py --version 1.5.0
+          python3 -c 'import os, sys; sys.path.insert(0, "scripts"); from prepare_configured_support import validate_tag; validate_tag(os.environ["RELEASE_TAG"])'
+      - name: Refuse existing tag or release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG" > refs.json
+          test "$(jq --arg ref "refs/tags/$RELEASE_TAG" '[.[] | select(.ref == $ref)] | length' refs.json)" = 0
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' > releases.txt
+          if grep -Fxq "$RELEASE_TAG" releases.txt; then echo 'Release already exists'; exit 1; fi
+      - name: Install signing dependency
+        run: python3 -m pip install PyNaCl==1.5.0
+      - name: Prepare signed public configuration
+        id: config
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          BETTERDESK_API_SERVER: ${{ vars.BETTERDESK_API_SERVER }}
+          BETTERDESK_ID_SERVER: ${{ vars.BETTERDESK_ID_SERVER }}
+          BETTERDESK_RELAY_SERVER: ${{ vars.BETTERDESK_RELAY_SERVER }}
+          BETTERDESK_SERVER_PUBLIC_KEY: ${{ vars.BETTERDESK_SERVER_PUBLIC_KEY }}
+          BETTERDESK_CONFIG_SIGNING_PUBLIC_KEY: ${{ vars.BETTERDESK_CONFIG_SIGNING_PUBLIC_KEY }}
+          BETTERDESK_CONFIG_SIGNING_SEED: ${{ secrets.BETTERDESK_CONFIG_SIGNING_SEED }}
+        run: python3 scripts/prepare_configured_support.py --tag "$RELEASE_TAG"
+
+  build:
+    needs: prepare
+    # Fail closed if GitHub withholds an output (for example secret masking).
+    if: needs.prepare.outputs.payload != '' && needs.prepare.outputs.public-key != ''
+    uses: ./.github/workflows/flutter-build.yml
+    with:
+      upload-artifact: true
+      upload-tag: ${{ inputs.tag }}
+      source-ref: ${{ github.sha }}
+      build-macos: false
+      support-config-b64: ${{ needs.prepare.outputs.payload }}
+      custom-client-signing-public-key: ${{ needs.prepare.outputs.public-key }}
+    # Retain existing optional OS signing integrations; the OEM seed is never read by build jobs.
+    secrets: inherit
+
+  package:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+      - name: Download real Windows installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: betterdesk-windows-installers-*
+          path: raw
+      - name: Download DEBs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: betterdesk-1.5.0-*.deb
+          path: raw
+      - name: Download produced RPMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: betterdesk-1.5.0-*-rpms
+          path: raw
+      - name: Validate and package release
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: python3 scripts/package_configured_support.py --raw raw --out out --tag "$RELEASE_TAG" --commit "$GITHUB_SHA"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: configured-support-release
+          path: out
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: configured-support-release
+          path: out
+      - name: Verify bundle and publish new release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          (cd out && sha256sum --check SHA256SUMS)
+          # Atomically create a new tag: HTTP 422 stops publication if it already exists.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+          cat > notes.md <<'NOTES'
+          Configured BetterDesk Support Agent (product version 1.5.0).
+
+          - Permanent incoming-only profile; account UI and settings disabled. This is not the full technician Client.
+          - Server endpoints and signed public configuration are embedded; API enrollment/registration remains possible and requires valid API TLS.
+          - Windows MSI installers and portable self-extracting EXEs; Linux DEBs and produced RPMs for x86_64 and aarch64.
+          - OEM configuration signatures are not OS code signing. No OS signing guarantee is made.
+          - manifest.json records the exact source SHA and installer hashes; verify downloads against SHA256SUMS.
+          NOTES
+          flags=()
+          if [[ "$PRERELEASE" == true ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" out/* --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --latest=false --title "BetterDesk Support configured $RELEASE_TAG" --notes-file notes.md "${flags[@]}"

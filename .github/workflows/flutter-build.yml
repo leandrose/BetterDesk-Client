@@ -6,6 +6,13 @@ name: Build BetterDesk desktop
 on:
   workflow_call:
     inputs:
+      build-macos:
+        type: boolean
+        default: true
+      custom-client-signing-public-key:
+        description: "Optional OEM public key override (Windows/Linux only)"
+        type: string
+        default: ""
       upload-artifact:
         type: boolean
         default: true
@@ -48,6 +55,8 @@ env:
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
+    with:
+      source-ref: ${{ inputs.source-ref }}
 
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
@@ -114,6 +123,12 @@ jobs:
 
       - name: Validate desktop packaging contract
         run: python scripts/validate_desktop_packaging.py
+
+      - name: Install configured Support public key
+        if: inputs.custom-client-signing-public-key != ''
+        env:
+          BETTERDESK_CONFIG_SIGNING_PUBLIC_KEY: ${{ inputs.custom-client-signing-public-key }}
+        run: python scripts/prepare_configured_support.py --install-public-key
 
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -443,6 +458,7 @@ jobs:
       # GitHub Release is published only by betterdesk-desktop-release.yml.
 
   build-for-macOS:
+    if: inputs.build-macos
     name: ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
@@ -719,6 +735,12 @@ jobs:
         with:
           swap-size-gb: 12
 
+      - name: Install configured Support public key
+        if: inputs.custom-client-signing-public-key != ''
+        env:
+          BETTERDESK_CONFIG_SIGNING_PUBLIC_KEY: ${{ inputs.custom-client-signing-public-key }}
+        run: python3 scripts/prepare_configured_support.py --install-public-key
+
       - name: Free Space
         run: |
           df -h
@@ -805,6 +827,8 @@ jobs:
             ls -l "${PWD}"
             ls -l /opt/artifacts/vcpkg/installed
           dockerRunArgs: |
+            --env BETTERDESK_SUPPORT_CONFIG_B64
+            --env BETTERDESK_GENERIC_SUPPORT
             --volume "${PWD}:/workspace"
             --volume "/opt/artifacts:/opt/artifacts"
           shell: /bin/bash
